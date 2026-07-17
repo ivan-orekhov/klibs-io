@@ -1,0 +1,115 @@
+package io.klibs.core.search.eval
+
+import kotlin.math.log2
+
+/**
+ * Search-eval scoring (KTL-4710): graded nDCG@10, pass criteria, two-level
+ * class-weighted headline, Class-E dealbreaker gate.
+ * Method: docs/search-eval/SCORING.md.
+ */
+object Scorer {
+
+    const val NDCG_K = 10
+
+    fun report(cases: List<EvalCase>, runCase: (EvalCase) -> List<SearchResult>): RunReport {
+        val outcomes = cases.map {
+            scoreCase(it, runCase(it))
+        }
+        val byClass = outcomes.groupBy { it.case.cls }.mapValues { (cls, classOutcomes) ->
+            val weightSum = classOutcomes.sumOf { it.case.weight }
+            ClassSummary(
+                cls = cls,
+                n = classOutcomes.size,
+                passed = classOutcomes.count { it.pass },
+                meanNdcg = if (weightSum != 0.0) classOutcomes.sumOf { it.case.weight * it.ndcg } / weightSum else 0.0,
+                mrr = classOutcomes.sumOf { it.reciprocalRank } / classOutcomes.size,
+            )
+        }
+        val classWeightSum = byClass.keys.sumOf { it.weight }
+        val headline = if (classWeightSum != 0.0)
+            byClass.entries.sumOf { (cls, d) -> cls.weight * d.meanNdcg } / classWeightSum else 0.0
+        val gateFailures = outcomes.filter { it.case.cls.gate && !it.pass }.map { it.case.id }
+        val graded = outcomes.filter { it.case.graded }
+        val gradedWeightSum = graded.sumOf { it.case.weight }
+        val gradedNdcg =
+            if (gradedWeightSum != 0.0) graded.sumOf { it.case.weight * it.ndcg } / gradedWeightSum else 0.0
+        return RunReport(
+            outcomes = outcomes, headline = headline, byClass = byClass, gateFailures = gateFailures,
+            gradedNdcg = gradedNdcg, gradedFailures = graded.filter { !it.pass }.map { it.case.id },
+            rawPassed = outcomes.count { it.pass },
+        )
+    }
+
+    internal fun scoreCase(case: EvalCase, results: List<SearchResult>): CaseOutcome {
+        val relevance = relevanceGrades(case)
+        val hits = results.mapIndexedNotNull { i, r -> if ((relevance[r.key] ?: 0) > 0) i + 1 else null }
+        val best = hits.minOrNull()
+        val (ok, detail) = when (val p = case.pass) {
+            is PassSpec.NonEmpty -> results.isNotEmpty() to "${results.size} results"
+            is PassSpec.AllSupportPlatform -> {
+                val want = case.platforms.map { it.lowercase() }.toSet()
+                val topK = p.k ?: results.size
+                val top = results.take(topK)
+                val violators = top.filterNot { it.platforms.containsAll(want) }.map { it.key }
+                (top.isNotEmpty() && violators.isEmpty()) to
+                        ("${top.size - violators.size}/${top.size} top-$topK support ${want.sorted()}" +
+                                if (violators.isNotEmpty()) "; violators: ${violators.take(3)}" else "")
+            }
+            is PassSpec.RankLe -> (best != null && best <= p.k) to "best rank=$best (need <= ${p.k})"
+            is PassSpec.AnyInTop -> hits.any { it <= p.k } to "hits in top-${p.k}: ${hits.filter { it <= p.k }}"
+            is PassSpec.PrecisionAt -> {
+                val precision = hits.count { it <= p.k }.toDouble() / p.k
+                (precision >= p.min) to "P@${p.k}=${"%.2f".format(precision)} (need >= ${p.min})"
+            }
+        }
+        val reciprocalRank = if (best != null) 1.0 / best else 0.0
+        val ndcg = ndcgAt(results, relevance)
+        val score = ndcg ?: if (ok) 1.0 else 0.0
+        return CaseOutcome(case, ok, detail, best, reciprocalRank, score, results.take(5).map { it.key })
+    }
+
+    internal fun ndcgAt(results: List<SearchResult>, relevance: Map<String, Int>, k: Int = NDCG_K): Double? {
+        if (relevance.isEmpty()) return null
+        val dcg = results.take(k).mapIndexed { i, r -> (relevance[r.key] ?: 0) / log2((i + 2).toDouble()) }.sum()
+        val idcg = relevance.values.sortedDescending().take(k)
+            .mapIndexed { i, grade -> grade / log2((i + 2).toDouble()) }.sum()
+        return if (idcg != 0.0) dcg / idcg else 0.0
+    }
+
+    internal fun relevanceGrades(case: EvalCase): Map<String, Int> {
+        val grades = LinkedHashMap<String, Int>()
+        case.expected.forEach { grades[it.lowercase()] = 2 }
+        case.also.forEach { grades.putIfAbsent(it.lowercase(), 1) }
+        return grades
+    }
+}
+
+data class CaseOutcome(
+    val case: EvalCase,
+    val pass: Boolean,
+    val detail: String,
+    val bestRank: Int?,
+    val reciprocalRank: Double,
+    val ndcg: Double,
+    val top5: List<String>,
+) {
+    /** Assertion message spelling out the query, what was expected, and what actually ranked. */
+    fun failureMessage(tier: String): String = buildString {
+        append("$tier: ${case.id} \"${case.query}\" — $detail")
+        append("\n  expected@2=${case.expected.ifEmpty { listOf("<none>") }}")
+        if (case.also.isNotEmpty()) append("  also@1=${case.also}")
+        append("\n  got top5=${top5.ifEmpty { listOf("<none>") }}")
+    }
+}
+
+data class ClassSummary(val cls: EvalClass, val n: Int, val passed: Int, val meanNdcg: Double, val mrr: Double)
+
+data class RunReport(
+    val outcomes: List<CaseOutcome>,
+    val headline: Double,
+    val byClass: Map<EvalClass, ClassSummary>,
+    val gateFailures: List<String>,
+    val gradedNdcg: Double,
+    val gradedFailures: List<String>,
+    val rawPassed: Int,
+)
