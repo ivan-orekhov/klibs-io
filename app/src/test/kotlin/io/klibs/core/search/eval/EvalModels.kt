@@ -58,6 +58,10 @@ data class EvalCase(
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class QueriesFile(val cases: List<EvalCase>)
 
+/** Regression floor: case ids proven to pass on the frozen snapshot. Regression asserts these stay green. */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class Floor(val ids: List<String> = emptyList())
+
 /** Eval baseline: last committed eval outcome on the prod-copy — a new run diffs against it to show progress. */
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class EvalBaseline(val headline: Double = 0.0, val passing: List<String> = emptyList())

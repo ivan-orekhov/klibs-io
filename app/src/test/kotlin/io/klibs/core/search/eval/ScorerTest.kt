@@ -80,6 +80,12 @@ class ScorerTest {
         assertTrue(cases.all { it.id.isNotBlank() && it.weight >= 1.0 })
     }
 
+    @Test
+    fun `regression floor references only real case ids`() {
+        val ids = SearchEvalData.loadCases().map { it.id }.toSet()
+        val floor = SearchEvalData.loadFloor()
+        assertTrue(ids.containsAll(floor)) { "floor references unknown ids: ${floor - ids}" }
+    }
 
     private fun results(vararg keys: String) = keys.map { SearchResult(it.lowercase(), emptySet()) }
 
