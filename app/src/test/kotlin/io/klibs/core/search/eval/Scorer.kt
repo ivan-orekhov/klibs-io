@@ -45,21 +45,23 @@ object Scorer {
         val hits = results.mapIndexedNotNull { i, r -> if ((relevance[r.key] ?: 0) > 0) i + 1 else null }
         val best = hits.minOrNull()
         val (ok, detail) = when (val p = case.pass) {
-            is PassSpec.NonEmpty -> results.isNotEmpty() to "${results.size} results"
+            is PassSpec.NonEmpty -> results.isNotEmpty() to "result count = ${results.size}, needs >= 1"
             is PassSpec.AllSupportPlatform -> {
                 val want = case.platforms.map { it.lowercase() }.toSet()
                 val topK = p.k ?: results.size
                 val top = results.take(topK)
                 val violators = top.filterNot { it.platforms.containsAll(want) }.map { it.key }
                 (top.isNotEmpty() && violators.isEmpty()) to
-                        ("${top.size - violators.size}/${top.size} top-$topK support ${want.sorted()}" +
+                        ("${top.size - violators.size}/${top.size} of top-$topK support ${want.sorted()}" +
                                 if (violators.isNotEmpty()) "; violators: ${violators.take(3)}" else "")
             }
-            is PassSpec.RankLe -> (best != null && best <= p.k) to "best rank=$best (need <= ${p.k})"
-            is PassSpec.AnyInTop -> hits.any { it <= p.k } to "hits in top-${p.k}: ${hits.filter { it <= p.k }}"
+            is PassSpec.RankLe -> (best != null && best <= p.k) to
+                    "rank of best relevant result = ${best ?: "none"}, needs <= ${p.k}"
+            is PassSpec.AnyInTop -> hits.any { it <= p.k } to
+                    "relevant hits in top-${p.k} = ${hits.filter { it <= p.k }}, needs >= 1"
             is PassSpec.PrecisionAt -> {
                 val precision = hits.count { it <= p.k }.toDouble() / p.k
-                (precision >= p.min) to "P@${p.k}=${"%.2f".format(precision)} (need >= ${p.min})"
+                (precision >= p.min) to "precision@${p.k} = ${"%.2f".format(precision)}, needs >= ${p.min}"
             }
         }
         val reciprocalRank = if (best != null) 1.0 / best else 0.0
@@ -95,10 +97,11 @@ data class CaseOutcome(
 ) {
     /** Assertion message spelling out the query, what was expected, and what actually ranked. */
     fun failureMessage(tier: String): String = buildString {
-        append("$tier: ${case.id} \"${case.query}\" — $detail")
-        append("\n  expected@2=${case.expected.ifEmpty { listOf("<none>") }}")
-        if (case.also.isNotEmpty()) append("  also@1=${case.also}")
-        append("\n  got top5=${top5.ifEmpty { listOf("<none>") }}")
+        append("$tier FAIL — ${case.id}   query=\"${case.query}\"")
+        append("\n  ${"check".padEnd(9)}: $detail")
+        append("\n  ${"primary".padEnd(9)}: ${case.expected.ifEmpty { listOf("<none>") }} (grade 2)")
+        append("\n  ${"secondary".padEnd(9)}: ${case.also.ifEmpty { listOf("<none>") }} (grade 1)")
+        append("\n  ${"returned".padEnd(9)}: ${top5.ifEmpty { listOf("<none>") }}")
     }
 }
 
